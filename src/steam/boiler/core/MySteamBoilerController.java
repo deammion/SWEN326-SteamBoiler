@@ -3,6 +3,7 @@ package steam.boiler.core;
 import org.eclipse.jdt.annotation.NonNull;
 import org.eclipse.jdt.annotation.Nullable;
 
+import steam.boiler.model.PhysicalUnits;
 import steam.boiler.model.SteamBoilerController;
 import steam.boiler.util.Mailbox;
 import steam.boiler.util.SteamBoilerCharacteristics;
@@ -70,17 +71,48 @@ public class MySteamBoilerController implements SteamBoilerController {
 		Message steamMessage = extractOnlyMatch(MessageKind.STEAM_v, incoming);
 		Message[] pumpStateMessages = extractAllMatches(MessageKind.PUMP_STATE_n_b, incoming);
 		Message[] pumpControlStateMessages = extractAllMatches(MessageKind.PUMP_CONTROL_STATE_n_b, incoming);
-		//
+		// 
 		if (transmissionFailure(levelMessage, steamMessage, pumpStateMessages, pumpControlStateMessages)) {
 			// Level and steam messages required, so emergency stop.
 			this.mode = State.EMERGENCY_STOP;
 		}
-		//
+		//pre initialisation, all pumps turned on to fill boiler
+		if (levelMessage.getDoubleParameter() == 0) {
+			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 0));
+			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 1));
+			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 2));
+			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 3));
+			outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.INITIALISATION));
+		}
+		
+		if(levelMessage.getDoubleParameter() >= maxWaterLevel()) {
+			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 0));
+			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 1));
+			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 2));
+			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 3));
+			this.mode = State.READY;	
+		}
+		
+		if(mode == State.READY) {
+			outgoing.send(new Message(MessageKind.PROGRAM_READY));
+			outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.NORMAL));
+		}
+		//normal mode, control pumps need to keep water level within tolerance
+		
+		if(levelMessage.getDoubleParameter() <= minWaterLevel()) {
+			double totalPumpCapacity = 0;
+			int i = 0;
+			while(steamMessage.getDoubleParameter() >= totalPumpCapacity) {
+				outgoing.send(new Message(MessageKind.OPEN_PUMP_n, i));
+				totalPumpCapacity += configuration.getPumpCapacity(i);
+				i++;
+			}
+		}
 
 		// FIXME: this is where the main implementation stems from
 
 		// NOTE: this is an example message send to illustrate the syntax
-		outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.INITIALISATION));
+		//outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.INITIALISATION));
 	}
 
 	/**
@@ -166,4 +198,33 @@ public class MySteamBoilerController implements SteamBoilerController {
 		}
 		return matches;
 	}
+	
+	private Double minWaterLevel() {
+		return configuration.getMinimalNormalLevel();
+	}
+	
+	private Double maxWaterLevel() {
+		return configuration.getMaximalNormalLevel();
+	}
+	
+	private Double normalWaterLevel() {
+		return configuration.getCapacity()/2;
+	}
+	
 }
+/**
+ * TODO method to monitor pumps, pump controller, steam outlet, are they within expected range relative to water level
+ * 
+ * TODO write code for clock
+ * 
+ * TODO maybe, back up controller for pumps
+ * 
+ * TODO method to return actual water level, check against expected level. create offset if outside expected level
+ * 
+ * TODO method to return pump state, pump rate
+ * 
+ * TODO method to return pump controller state
+ * 
+ * TODO method to return steam output
+ * 
+ */
