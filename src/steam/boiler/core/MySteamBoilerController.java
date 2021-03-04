@@ -77,37 +77,23 @@ public class MySteamBoilerController implements SteamBoilerController {
 			this.mode = State.EMERGENCY_STOP;
 		}
 		//pre initialisation, all pumps turned on to fill boiler
-		if (levelMessage.getDoubleParameter() == 0) {
-			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 0));
-			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 1));
-			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 2));
-			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 3));
-			outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.INITIALISATION));
-		}
-		
-		if(levelMessage.getDoubleParameter() >= maxWaterLevel()) {
-			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 0));
-			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 1));
-			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 2));
-			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 3));
-			this.mode = State.READY;	
+		if (this.mode == State.WAITING) {
+			initialisationMode(levelMessage,outgoing);
 		}
 		
 		if(mode == State.READY) {
+			System.out.println("ready state");
 			outgoing.send(new Message(MessageKind.PROGRAM_READY));
 			outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.NORMAL));
+			this.mode = State.NORMAL;
+		}
+		
+		if(mode == State.NORMAL) {
+			//System.out.println("normal mode");
+			normalOperationMode(levelMessage, steamMessage, pumpStateMessages, outgoing);
 		}
 		//normal mode, control pumps need to keep water level within tolerance
 		
-		if(levelMessage.getDoubleParameter() <= minWaterLevel()) {
-			double totalPumpCapacity = 0;
-			int i = 0;
-			while(steamMessage.getDoubleParameter() >= totalPumpCapacity) {
-				outgoing.send(new Message(MessageKind.OPEN_PUMP_n, i));
-				totalPumpCapacity += configuration.getPumpCapacity(i);
-				i++;
-			}
-		}
 
 		// FIXME: this is where the main implementation stems from
 
@@ -199,6 +185,65 @@ public class MySteamBoilerController implements SteamBoilerController {
 		return matches;
 	}
 	
+	private void initialisationMode(Message levelMessage, @NonNull Mailbox outgoing) {
+		outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.INITIALISATION));
+		if(levelMessage.getDoubleParameter() < configuration.getMinimalNormalLevel()) {
+			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 0));
+			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 1));
+			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 2));
+			outgoing.send(new Message(MessageKind.OPEN_PUMP_n, 3));
+		} else if (levelMessage.getDoubleParameter() > configuration.getMinimalNormalLevel() && levelMessage.getDoubleParameter() < normalWaterLevel()) {
+			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 2));
+			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 3));
+		} else {
+			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 0));
+			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, 1));
+			this.mode = State.READY;
+		}
+	}
+	
+	private void normalOperationMode(Message levelMessage, Message steamMessage, Message[] pumpStateMessages,@NonNull Mailbox outgoing) {
+		//System.out.println("normal operation mode");
+		int pumpsToActivate = pumpsToActivate(levelMessage, steamMessage);
+		int currentPumpsOpen = 0;
+		for(int i = 0; i < 4; i++) {
+			if(pumpStateMessages[i].getBooleanParameter() == true) {
+				currentPumpsOpen += 1;
+			}
+		}
+		if(currentPumpsOpen > pumpsToActivate) {
+			for(int i = currentPumpsOpen; i >= pumpsToActivate; i--) {
+				outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, i));
+			}
+		} else if (currentPumpsOpen < pumpsToActivate) {
+			for(int i = 0; i <= pumpsToActivate; i++) {
+				outgoing.send(new Message(MessageKind.OPEN_PUMP_n, i));
+			}
+		}
+	}
+	
+	private int pumpsToActivate(Message levelMessage, Message steamMessage) {
+		//System.out.println("pumps to activate");
+		int pumpsAvaliable = configuration.getNumberOfPumps();
+		double pumpCapacity = configuration.getPumpCapacity(0);
+		double[] maxPerPumpsOpen = {0,0,0,0};
+		double[] minPerPumpsOpen = {0,0,0,0};
+		double[] averagePerPumpsOpen = {0,0,0,0};
+		for(int i = 0; i < pumpsAvaliable; i++) {
+			maxPerPumpsOpen[i] = levelMessage.getDoubleParameter() + (5 * pumpCapacity * i) - (5 * steamMessage.getDoubleParameter());
+			minPerPumpsOpen[i] = levelMessage.getDoubleParameter() + (5 * pumpCapacity * i) - (5 * configuration.getMaximualSteamRate());
+			averagePerPumpsOpen[i] = ((maxPerPumpsOpen[i] + minPerPumpsOpen[i]) / 2);
+		}
+		for(int pumpsToActivate = 0; pumpsToActivate < pumpsAvaliable; pumpsToActivate++) {
+			if(levelMessage.getDoubleParameter() >= configuration.getMaximalLimitLevel()) {
+				return 0;
+			}else if(averagePerPumpsOpen[pumpsToActivate] >= normalWaterLevel()) {
+				return pumpsToActivate;
+			}
+		}
+		return 0;
+	}
+	
 	private Double minWaterLevel() {
 		return configuration.getMinimalNormalLevel();
 	}
@@ -212,19 +257,4 @@ public class MySteamBoilerController implements SteamBoilerController {
 	}
 	
 }
-/**
- * TODO method to monitor pumps, pump controller, steam outlet, are they within expected range relative to water level
- * 
- * TODO write code for clock
- * 
- * TODO maybe, back up controller for pumps
- * 
- * TODO method to return actual water level, check against expected level. create offset if outside expected level
- * 
- * TODO method to return pump state, pump rate
- * 
- * TODO method to return pump controller state
- * 
- * TODO method to return steam output
- * 
- */
+
