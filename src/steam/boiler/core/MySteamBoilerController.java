@@ -300,6 +300,13 @@ public class MySteamBoilerController implements SteamBoilerController {
 		return pumpsToActivate;
 	}
 	
+	/**
+	 * Helper method used to return true capacity of pumps, useful if not all pumps have the 
+	 * same capacity. i.e. half capacity etc
+	 * 
+	 * @param pumpNumber - which/how many of the pumps capacity is required
+	 * @return pumpTotalCapacity - a double dictating the sum of the selected pumps capacity
+	 */
 	private double getPumpTotalCapacity(int pumpNumber) {
 		int pumpTotalCapacity = 0;
 		for(int i = 0; i <= pumpNumber; i++) {
