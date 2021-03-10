@@ -33,6 +33,9 @@ public class MySteamBoilerController implements SteamBoilerController {
   private State mode = State.WAITING;
   
   private Boolean emptyingTank = false;
+  
+  private double lastKnownWaterLevel = 0.0;
+  private double lastKnownSteamLevel = 0.0;
 
   /**
    * Construct a steam boiler controller for a given set of characteristics.
@@ -101,14 +104,28 @@ public class MySteamBoilerController implements SteamBoilerController {
 		//
 		if(mode == State.READY) {
 			outgoing.send(new Message(MessageKind.PROGRAM_READY));
-			outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.NORMAL));
-			this.mode = State.NORMAL;
+			if(physicalUnitReady != null) {
+				outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.NORMAL));
+				this.mode = State.NORMAL;
+			}
 		}
 		
 		if(mode == State.NORMAL) {
-			normalOperationMode(levelMessage, steamMessage, pumpStateMessages, outgoing);
+			normalOperationMode(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter(), pumpStateMessages, outgoing);
+			Message failureMessage = detectFailureMessage(incoming);
+			if (failureMessage != null) {
+				outgoing.send(failureMessage);
+				if(mode == State.DEGRADED) {
+					degradeOperationalMode(failureMessage, pumpStateMessages, outgoing);
+				} else if (mode == State.RESCUE) {
+					rescueOperationalMode(failureMessage, pumpStateMessages, steamMessage.getDoubleParameter(), outgoing);
+				}
+			}
 		}
 		
+		if(mode == State.EMERGENCY_STOP) {
+			emergencyShutdown(outgoing);
+		}
 		
 	}
 
@@ -204,6 +221,10 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @param outgoing - outgoing mailbox to send pump controllers commands
 	 */
 	private void initialisationMode(Double waterLevel, @NonNull Mailbox outgoing) {
+		//make sure emptying valve is closed before starting to fill tank
+		if(emptyingTank) {
+			outgoing.send(new Message(MessageKind.VALVE));
+		}
 		outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.INITIALISATION));
 		//turn on all pumps to allow for faster filling of boiler, also tests all pumps are operational
 		if(waterLevel < minWaterLevel()) {
@@ -239,25 +260,107 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @param pumpStateMessages - incoming message about pumps states
 	 * @param outgoing - send messages to pump controllers
 	 */
-	private void normalOperationMode(Message levelMessage, Message steamMessage, Message[] pumpStateMessages,@NonNull Mailbox outgoing) {
+	private void normalOperationMode(Double waterLevel, Double steamLevel, Message[] pumpStates,@NonNull Mailbox outgoing) {
 		//System.out.println("normal operation mode");
-		int pumpsToActivate = pumpsToActivate(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter());
-		int pumpsAvailable = configuration.getNumberOfPumps();
-		int currentPumpsOpen = -1; //represents no pumps open, 0 would indicated 1 pump, pump no.0 is open
-		for(int i = 0; i < pumpsAvailable; i++) {
-			if(pumpStateMessages[i].getBooleanParameter() == true) {
-				currentPumpsOpen += 1;
+		int pumpsToActivate = pumpsToActivate(waterLevel, steamLevel);
+		
+		//updates the lastKnownWaterLevel each cycle, in case water level sensor failures
+		if(waterLevel != null) {
+			lastKnownWaterLevel = waterLevel;
+		}
+		
+		if(steamLevel != null) {
+			lastKnownSteamLevel = steamLevel;
+		}
+		
+		if(detectAnomaly(waterLevel, steamLevel, pumpsToActivate) != 0) {
+			mode = State.DEGRADED;
+		}
+		turnPumpsOnOff(getPumpsOpen(pumpStates), pumpsToActivate, outgoing);
+	}
+	
+	private void rescueOperationalMode(Message failureMessage,Message[] pumpStates, Double steamLevel, @NonNull Mailbox outgoing) {
+		int currentPumpsOpen = getPumpsOpen(pumpStates); //represents no. of pumps open, 0 would indicated 1 pump, pump no.0 is open
+
+		lastKnownWaterLevel = estimateWaterLevel(currentPumpsOpen, lastKnownWaterLevel, steamLevel);
+		
+		int pumpsToActivate = pumpsToActivate(lastKnownWaterLevel, steamLevel);
+		
+		turnPumpsOnOff(currentPumpsOpen, pumpsToActivate, outgoing);
+	}
+
+	private void degradeOperationalMode(Message failureMessage, Message[] pumpStates, @NonNull Mailbox outgoing) {
+		System.out.println("degraded mode");
+		
+		int waterLevelAnomaly = detectAnomaly(lastKnownWaterLevel, lastKnownSteamLevel,getPumpsOpen(pumpStates));
+		
+		//-1 suggests a pump is stuck closed
+		if(waterLevelAnomaly == -1) {
+			
+		}
+		//1 suggests a pumps is stuck open
+		else if(waterLevelAnomaly == 1) {
+			
+		}
+		
+	}
+	
+	private void emergencyShutdown(@NonNull Mailbox outgoing) {
+		outgoing.send(new Message(MessageKind.STOP));
+		if(!emptyingTank) {
+			outgoing.send(new Message(MessageKind.VALVE));
+			emptyingTank = true;
+		}
+	}
+		
+	/**
+	 * Checks incoming Mailbox for failure detection messages, then returns acknowledgement message 
+	 * 
+	 * @param incoming - incoming Mailbox
+	 * @return Message - new failure acknowledgement message
+	 */
+	private Message detectFailureMessage(@NonNull Mailbox incoming) {
+		int numberOfPumps = configuration.getNumberOfPumps();
+		
+		double waterLevel = extractOnlyMatch(MessageKind.LEVEL_v, incoming).getDoubleParameter();
+		
+		Message steamFailure = extractOnlyMatch(MessageKind.STEAM_FAILURE_DETECTION, incoming);
+		Message levelFailure = extractOnlyMatch(MessageKind.LEVEL_FAILURE_DETECTION, incoming);
+		Message[] pumpControlFailure = extractAllMatches(MessageKind.PUMP_CONTROL_FAILURE_DETECTION_n,incoming);
+		Message[] pumpFailure = extractAllMatches(MessageKind.PUMP_FAILURE_DETECTION_n, incoming);
+		
+		if(levelFailure != null) {
+			mode = State.RESCUE;
+			return new Message(MessageKind.LEVEL_FAILURE_ACKNOWLEDGEMENT);
+		}
+		
+		if(steamFailure != null) {
+			mode = State.DEGRADED;
+			return new Message(MessageKind.STEAM_OUTCOME_FAILURE_ACKNOWLEDGEMENT);
+		}
+		
+		if(waterLevel > configuration.getMaximalLimitLevel() || waterLevel < configuration.getMinimalLimitLevel()) {
+			mode = State.EMERGENCY_STOP;
+		}
+		
+		if(pumpControlFailure.length > 0) {
+			for(int i = 0; i <= pumpControlFailure.length; i++) {
+				if(pumpControlFailure[i] != null) {
+					mode = State.DEGRADED;
+					return new Message(MessageKind.PUMP_CONTROL_FAILURE_ACKNOWLEDGEMENT_n, i);
+				}
 			}
 		}
-		if(currentPumpsOpen > pumpsToActivate) {
-			for(int i = (pumpsAvailable - 1); i > pumpsToActivate; i--) {
-				outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, i));
-			}
-		} else if (currentPumpsOpen < pumpsToActivate) {
-			for(int i = 0; i <= pumpsToActivate; i++) {
-				outgoing.send(new Message(MessageKind.OPEN_PUMP_n, i));
+		
+		if(pumpFailure.length > 0) {
+			for(int i = 0; i <= pumpFailure.length; i++) {
+				if(pumpFailure[i] != null) {
+					mode = State.DEGRADED;
+					return new Message(MessageKind.PUMP_FAILURE_ACKNOWLEDGEMENT_n, i);
+				}
 			}
 		}
+		return null;
 	}
 	
 	/**
@@ -267,7 +370,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * 
 	 * @param waterLevel - double representative of the water level given by the level sensor
 	 * @param steamLevel - double representative of the stem production given by the steam sensor
-	 * @return pumpsToActivate - int, number of pumps to activate -1 indicates nil pumps to open
+	 * @return pumpsToActivate - integer, number of pumps to activate -1 indicates nil pumps to open
 	 */
 	private int pumpsToActivate(Double waterLevel, Double steamLevel) {
 		int pumpsToActivate = -1;
@@ -281,8 +384,8 @@ public class MySteamBoilerController implements SteamBoilerController {
 		
 		//calculate the possible range of the water levels per pump(s) activated
 		for(int i = 0; i < pumpsAvaliable; i++) {
-			maxPerPumpsOpen[i] = waterLevel + (5 * getPumpTotalCapacity(i)) - (5 * steamLevel);
-			minPerPumpsOpen[i] = waterLevel + (5 * getPumpTotalCapacity(i)) - (5 * configuration.getMaximualSteamRate());
+			maxPerPumpsOpen[i] = getMaxLevelPerPump(waterLevel, i, steamLevel);
+			minPerPumpsOpen[i] = getMinLevelPerPump(waterLevel, i);
 			proximtyToOptimal[i] = Math.abs(((maxPerPumpsOpen[i] + minPerPumpsOpen[i]) / 2) - optimalWaterLevel());
 		}
 		//if current water level is above max normal level, returns -1 which will shut all pumps
@@ -301,18 +404,126 @@ public class MySteamBoilerController implements SteamBoilerController {
 	}
 	
 	/**
+	 * returns an integer indicating if the Anomaly is positive or negative
+	 * returning 1 means the water level is above the expected level + 10%
+	 * returning -1 means the level is below the expected value - 10%
+	 * returning 0 means the level is within the expected values
+	 * 
+	 * @param waterLevel
+	 * @param steamLevel
+	 * @param pumpsActivated
+	 * @return integer
+	 */
+	private int detectAnomaly(double waterLevel, double steamLevel, int pumpsActivated) {
+		double maxLevel = getMaxLevelPerPump(waterLevel, pumpsActivated, steamLevel) * 1.1;
+		double minLevel = getMinLevelPerPump(waterLevel, pumpsActivated) * 0.9;
+		if(waterLevel > maxLevel && waterLevel > configuration.getMaximalNormalLevel()) {
+			return 1;
+		} else if (waterLevel < minLevel && waterLevel < configuration.getMinimalNormalLevel()) {
+			return -1;
+		}
+		return 0;
+	}
+	
+	/**
 	 * Helper method used to return true capacity of pumps, useful if not all pumps have the 
 	 * same capacity. i.e. half capacity etc
 	 * 
 	 * @param pumpNumber - which/how many of the pumps capacity is required
 	 * @return pumpTotalCapacity - a double dictating the sum of the selected pumps capacity
 	 */
-	private double getPumpTotalCapacity(int pumpNumber) {
+	private double getPumpTotalCapacity(int numberOfPumps, int pumpStuckOpen, int pumpStuckClosed) {
 		int pumpTotalCapacity = 0;
-		for(int i = 0; i <= pumpNumber; i++) {
+		for(int i = 0; i <= numberOfPumps; i++) {
 			pumpTotalCapacity += configuration.getPumpCapacity(i);
+			if(pumpStuckOpen > i && pumpStuckOpen != i) {
+				pumpTotalCapacity += configuration.getPumpCapacity(pumpStuckOpen);
+			}
+			else if(pumpStuckClosed <= i) {
+				pumpTotalCapacity -= configuration.getPumpCapacity(pumpStuckClosed);
+			}
 		}
 		return pumpTotalCapacity;
+	}
+	
+	/**
+	 * Returns an integer indicating the amount of pumps open
+	 * 
+	 * @param pumpStates
+	 * @return integer 
+	 */
+	private int getPumpsOpen(Message[] pumpStates) {
+		int currentPumpsOpen = -1;
+		int pumpsAvailable = configuration.getNumberOfPumps();
+		for(int i = 0; i < pumpsAvailable; i++) {
+			if(pumpStates[i].getBooleanParameter() == true) {
+				currentPumpsOpen += 1;
+			}
+		}
+		return currentPumpsOpen;
+	}
+	
+	/**
+	 * sends messages to turn pumps on or off depending on need
+	 * 
+	 * @param currentPumpsOpen
+	 * @param pumpsToActivate
+	 * @param outgoing
+	 */
+	private void turnPumpsOnOff(int currentPumpsOpen, int pumpsToActivate, @NonNull Mailbox outgoing) {
+		int pumpsAvailable = configuration.getNumberOfPumps();
+		if(currentPumpsOpen > pumpsToActivate) {
+			for(int i = (pumpsAvailable - 1); i > pumpsToActivate; i--) {
+				outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, i));
+			}
+		} else if (currentPumpsOpen < pumpsToActivate) {
+			for(int i = 0; i <= pumpsToActivate; i++) {
+				outgoing.send(new Message(MessageKind.OPEN_PUMP_n, i));
+			}
+		}
+	}
+	
+	/**
+	 * method used to estimate water level if the sensor breaks based of last known reading
+	 * for first cycle it will use the last reading provided by the sensor
+	 * after first cycle it will use the max per pump opened as an estimated of the water level
+	 * 
+	 * @param pumpsActive
+	 * @param waterLevel
+	 * @param steamLevel
+	 * @return an estimated water level in lieu of the water level sensor reading
+	 */
+	private double estimateWaterLevel(int pumpsActive, Double waterLevel, Double steamLevel, int pumpStuckOpen, int pumpStuckClosed) {
+		double maxPossibleWaterLevel = getMaxLevelPerPump(waterLevel, pumpsActive, steamLevel, pumpStuckOpen, pumpStuckClosed);
+		double minPossibleWaterLevel = getMinLevelPerPump(waterLevel, pumpsActive, pumpStuckOpen, pumpStuckClosed);
+		return ((maxPossibleWaterLevel + minPossibleWaterLevel) / 2);
+	}
+	
+	private double estimateSteamLevel(double lastKnownWaterLevel, double waterLevel, int pumpsOpen) {
+		return (lastKnownWaterLevel + (getPumpTotalCapacity(pumpsOpen, -1, -1) * 5)) - waterLevel;
+	}
+	
+	/**
+	 * helper method used to calculate the max possible water level after one cycle
+	 * 
+	 * @param waterLevel  - current water level, either by sensor reading or estimateWaterLevel method
+	 * @param pumpsActive - integer indicating how many pumps will be opened
+	 * @param steamLevel  - current steam output level given via sensor
+	 * @return double     - max possible water level after one cycle
+	 */
+	private double getMaxLevelPerPump(double waterLevel, int pumpsActive, double steamLevel, int pumpStuckOpen, int pumpStuckClosed) {
+		return waterLevel + (5 * getPumpTotalCapacity(pumpsActive, pumpStuckOpen, pumpStuckClosed)) - (5 * steamLevel);
+	}
+	
+	/**
+	 * helper method used to calculate the minimum possible water level after one cycle
+	 * 
+	 * @param waterLevel  - current water level, either by sensor reading or estimateWaterLevel method
+	 * @param pumpsActive - integer indicating how many pumps will be opened
+	 * @return double     - minimum possible water level after one cycle
+	 */
+	private double getMinLevelPerPump(double waterLevel, int pumpsActive, int pumpStuckOpen, int pumpStuckClosed) {
+		return waterLevel + (5 * getPumpTotalCapacity(pumpsActive, pumpStuckOpen, pumpStuckClosed)) - (5 * configuration.getMaximualSteamRate());
 	}
 	
 	/**
