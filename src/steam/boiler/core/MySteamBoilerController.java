@@ -66,6 +66,11 @@ public class MySteamBoilerController implements SteamBoilerController {
    */
   private boolean steamLevelFailure = false;
   private boolean waterLevelFailure = false;
+  
+  /**
+   * boolean to track steam boiler heater operation
+   */
+  private boolean heaterOn = false;
 
   /**
    * Construct a steam boiler controller for a given set of characteristics.
@@ -109,9 +114,6 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 */
 	@Override
 	public void clock(@NonNull Mailbox incoming, @NonNull Mailbox outgoing) {
-		System.out.println("--------------------------------------------------------------------------");
-		System.out.println("INCOMING: " + incoming);
-		
 		// Extract expected messages
 		Message levelMessage = extractOnlyMatch(MessageKind.LEVEL_v, incoming);
 		Message steamMessage = extractOnlyMatch(MessageKind.STEAM_v, incoming);
@@ -125,57 +127,67 @@ public class MySteamBoilerController implements SteamBoilerController {
 			// Level and steam messages required, so emergency stop.
 			this.mode = State.EMERGENCY_STOP;
 		}
-		
-		if(detectPumpFailure(levelMessage.getDoubleParameter(), pumpStateMessages, pumpControlStateMessages, outgoing) || 
-				detectSteamLevelFailure(steamMessage, outgoing) && mode == State.NORMAL) {
-			outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.DEGRADED));
-			mode = State.DEGRADED;
+		if(detectImminentFailure(lastKnownWaterLevel)) {
+			this.mode = State.EMERGENCY_STOP;
 		}
 		
-		if(dectectWaterLevelFailure(levelMessage, outgoing) && mode == State.NORMAL) {
-			outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.RESCUE));
-			this.mode = State.RESCUE;
-		}
-		
-		if(detectRepair(incoming, outgoing)) {
-			outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.NORMAL));
-			this.mode = State.NORMAL;
-		}
-				
-		if (this.mode == State.WAITING && boilerWaiting != null) {
-			if(steamMessage == null || steamMessage.getDoubleParameter() != 0.0) {
-				this.mode = State.EMERGENCY_STOP;
-			} 
-			else {
-				outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.INITIALISATION));
-				initialisationMode(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter(), pumpStateMessages, outgoing);
+		if(this.mode != State.EMERGENCY_STOP) {
+
+			
+			if((detectPumpFailure(levelMessage.getDoubleParameter(), pumpStateMessages, pumpControlStateMessages, outgoing) || 
+					detectSteamLevelFailure(steamMessage, outgoing)) && this.mode == State.NORMAL) {
+				mode = State.DEGRADED;
 			}
-		}
 		
-		if(mode == State.READY) {
-			if(physicalUnitReady != null) {
+			if(dectectWaterLevelFailure(levelMessage, outgoing) && this.mode == State.NORMAL) {
+				this.mode = State.RESCUE;
+			}
+				
+			if(detectRepair(incoming, outgoing)) {
 				outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.NORMAL));
 				this.mode = State.NORMAL;
 			}
-		}
 		
-		if(mode == State.NORMAL) {
-			normalOperationMode(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter(), pumpStateMessages, pumpControlStateMessages, outgoing);
-		}
+			if (this.mode == State.WAITING) {
+				waitingMode(steamMessage, levelMessage, boilerWaiting, pumpStateMessages, outgoing);
+			}
 		
-		if(mode == State.DEGRADED) {
-			degradeOperationalMode(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter(), pumpStateMessages, outgoing);
-		}
+			if(mode == State.READY) {
+				readyMode(physicalUnitReady, outgoing);
+			}
 		
-		if(mode == State.RESCUE) {
-			rescueOperationalMode(pumpStateMessages, steamMessage.getDoubleParameter(), outgoing);
-		}
+			if(mode == State.NORMAL) {
+				normalOperationMode(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter(), pumpStateMessages, pumpControlStateMessages, outgoing);
+			}
 		
-		if(mode == State.EMERGENCY_STOP) {
+			if(mode == State.DEGRADED) {
+				degradeOperationalMode(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter(), pumpStateMessages, outgoing);
+			}
+		
+			if(mode == State.RESCUE) {
+				rescueOperationalMode(pumpStateMessages, steamMessage.getDoubleParameter(), outgoing);
+			}
+			
+			updateExpectedLevels(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter());
+		}else if(mode == State.EMERGENCY_STOP) {
+			closeAllPumps(outgoing);
 			emergencyShutdown(outgoing);
 		}
-		System.out.println("OUTGOING: " + outgoing);
-		System.out.println("--------------------------------------------------------------------------");
+	}
+	
+	/**
+	 * updates the last known steam level and water level variables
+	 * 
+	 * @param waterLevel
+	 * @param steamLevel
+	 */
+	private void updateExpectedLevels(double waterLevel, double steamLevel) {
+		if(!waterLevelFailure) {
+			lastKnownWaterLevel = waterLevel;
+		}
+		if(!steamLevelFailure) {
+			lastKnownSteamLevel = steamLevel;
+		}
 	}
 
 	/**
@@ -263,6 +275,41 @@ public class MySteamBoilerController implements SteamBoilerController {
 	}
 	
 	/**
+	 * 
+	 * 
+	 * @param steamMessage
+	 * @param levelMessage
+	 * @param boilerWaiting
+	 * @param pumpStateMessages
+	 * @param outgoing
+	 */
+	private void waitingMode(Message steamMessage, Message levelMessage, Message boilerWaiting, Message[] pumpStateMessages, Mailbox outgoing) {
+		outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.INITIALISATION));
+		if(steamMessage == null || steamMessage.getDoubleParameter() != 0.0
+				|| waterLevelFailure || steamLevelFailure) {
+			emergencyShutdown(outgoing);
+		} 
+		if(boilerWaiting != null) {
+			initialisationMode(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter(), pumpStateMessages, outgoing);
+		}
+	}
+	
+	/**
+	 * 
+	 * 
+	 * @param physicalUnitReady
+	 * @param outgoing
+	 */
+	private void readyMode(Message physicalUnitReady, Mailbox outgoing) {
+		outgoing.send(new Message(MessageKind.PROGRAM_READY));
+		if(physicalUnitReady != null) {
+			heaterOn = true;
+			outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.NORMAL));
+			this.mode = State.NORMAL;
+		} 
+	}
+	
+	/**
 	 * Initialistion Mode turns on all the pumps, checking functionality, then closes pumps as the boiler\
 	 * begins to fill, shuts all pumps when boiler is above optimal level (half capacity)
 	 * 
@@ -271,26 +318,21 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 */
 	private void initialisationMode(double waterLevel, double steamLevel, Message[] pumpStates, @NonNull Mailbox outgoing) {
 		//make sure emptying valve is closed before starting to fill tank
-		if(emptyingTank) {
+		if(emptyingTank && waterLevel < maxWaterLevel()) {
 			outgoing.send(new Message(MessageKind.VALVE));
 			emptyingTank = false;
 		}
-		outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.INITIALISATION));
-		
+
 		int pumpsToActivate = pumpsToActivate(waterLevel, steamLevel);
-		
 		turnPumpsOnOff(getPumpsOpen(pumpStates), getPumpsClosed(pumpStates), pumpsToActivate, outgoing);
-		
 
 		//checks water level is within minimal and max normal water level
 		if(waterLevel > minWaterLevel() && waterLevel < maxWaterLevel()) {
 				this.mode = State.READY;
-				outgoing.send(new Message(MessageKind.PROGRAM_READY));
 		} else if (waterLevel > maxWaterLevel()) {
 				outgoing.send(new Message(MessageKind.VALVE));
 				emptyingTank = true;
-		}
-				
+		}		
 	}
 	
 	/**
@@ -302,19 +344,9 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @param outgoing - send messages to pump controllers
 	 */
 	private void normalOperationMode(Double waterLevel, Double steamLevel, Message[] pumpStates, Message[] pumpControllerStates,@NonNull Mailbox outgoing) {
-		//System.out.println("normal operation mode");
+		outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.NORMAL));
 		int pumpsToActivate = pumpsToActivate(waterLevel, steamLevel);
-
-		//updates the lastKnownWaterLevel each cycle, in case the water level sensor fails
-		if(waterLevel != null) {
-			lastKnownWaterLevel = waterLevel;
-		}
-		//updates the lastKnownSteamLevel each cycle, in case the steam level sensor fails
-		if(steamLevel != null) {
-			lastKnownSteamLevel = steamLevel;
-		}
-		turnPumpsOnOff(getPumpsOpen(pumpStates), getPumpsClosed(pumpStates), pumpsToActivate, outgoing);
-		
+		turnPumpsOnOff(getPumpsOpen(pumpStates), getPumpsClosed(pumpStates), pumpsToActivate, outgoing);		
 	}
 	
 	/**
@@ -328,17 +360,13 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @param outgoing
 	 */
 	private void degradeOperationalMode(Double waterLevel, Double steamLevel, Message[] pumpStates, @NonNull Mailbox outgoing) {
-		//if failure is degraded mode is due to steam sensor failure, system will estimate the steam level
+		outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.DEGRADED));
+		//if degraded mode is due to steam sensor failure, system will estimate the steam level
 		if(steamLevelFailure) {
 			steamLevel = estimateSteamLevel(lastKnownWaterLevel, waterLevel, getPumpsOpen(pumpStates));
+			lastKnownSteamLevel = steamLevel;
 		}
-		
 		int pumpsToActivate = pumpsToActivate(waterLevel, steamLevel);
-		
-		if(waterLevel != null) {
-			lastKnownWaterLevel = waterLevel;
-		}
-		
 		turnPumpsOnOff(getPumpsOpen(pumpStates), getPumpsClosed(pumpStates), pumpsToActivate, outgoing);
 	}
 	
@@ -352,11 +380,10 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @param outgoing
 	 */
 	private void rescueOperationalMode(Message[] pumpStates, Double steamLevel, @NonNull Mailbox outgoing) {
+		outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.RESCUE));
 		int activePumps = getPumpsOpen(pumpStates).length;
 		double estimatedWaterLevel = estimateWaterLevel(activePumps, lastKnownWaterLevel, steamLevel);
-		
 		int pumpsToActivate = pumpsToActivate(estimatedWaterLevel, steamLevel);
-		
 		lastKnownWaterLevel = estimatedWaterLevel;
 		
 		turnPumpsOnOff(getPumpsOpen(pumpStates), getPumpsClosed(pumpStates), pumpsToActivate, outgoing);
@@ -368,8 +395,10 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @param outgoing - outgoing mailbox to send stop and valve opening message
 	 */
 	private void emergencyShutdown(@NonNull Mailbox outgoing) {
-		outgoing.send(new Message(MessageKind.STOP));
-		outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.EMERGENCY_STOP));
+		
+		for(int i =0; i <= 2; i++) {
+			outgoing.send(new Message(MessageKind.MODE_m,Mailbox.Mode.EMERGENCY_STOP));
+		}
 		if(!emptyingTank) {
 			outgoing.send(new Message(MessageKind.VALVE));
 			emptyingTank = true;
@@ -402,7 +431,6 @@ public class MySteamBoilerController implements SteamBoilerController {
 				outgoing.send(new Message(MessageKind.PUMP_FAILURE_DETECTION_n, i));
 				pumpFailureDetected[i] = true;
 				return true;
-				
 			}
 			//FAIL - c5 -pump
 			else if (getPumpState(pumpStates, i) != pumpKnownState[i] 
@@ -470,6 +498,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 		for(int i = 0; i < getNoOfPumps(); i++) {
 			if(pumpFailureDetected[i] == true || pumpControllerFailureDetected[i] == true) {
 				pumpOrPumpControllerFailure = true;
+				return false;
 			}
 		}
 		
@@ -481,7 +510,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 			return true;
 		} 
 		//checks water level is within expected range and not caused by pump or controller failure
-		else if (!waterLevelWithinLimits(waterLevel.getDoubleParameter()) && !pumpOrPumpControllerFailure) {
+		else if (!waterLevelWithinLimits(waterLevel.getDoubleParameter()) && !pumpOrPumpControllerFailure && mode == State.NORMAL) {
 			waterLevelFailure = true;
 			outgoing.send(new Message(MessageKind.LEVEL_FAILURE_DETECTION));
 			return true;
@@ -489,6 +518,30 @@ public class MySteamBoilerController implements SteamBoilerController {
 		return false;
 	}
 	
+	/**
+	 * detects multiple failures which will trigger an emergency shut down
+	 * 
+	 * @return boolean - true means multiply failures have been detected
+	 */
+	private boolean detectImminentFailure(double waterLevel) {
+		if(waterLevelFailure && steamLevelFailure) {
+			return true;
+		} else if (waterLevel > maxSafteyLimit() && this.mode != State.WAITING) {
+			return true;
+		} else if (waterLevel < minSafteyLimit()*1.2 && heaterOn == true) {
+			return true;
+		}
+		return false;
+	}
+	
+	/**
+	 * detects incoming repaired messages from physical units / operator desk
+	 * resets programs booleans depending on message
+	 * 
+	 * @param incoming - incoming messages checks for any repair message
+	 * @param outgoing - outgoing mailbox to send repair acknowledgement message
+	 * @return boolean - true if repair message has been detected
+	 */
 	private boolean detectRepair(@NonNull Mailbox incoming, @NonNull Mailbox outgoing) {
 		Message[] pumpRepaired = extractAllMatches(MessageKind.PUMP_REPAIRED_n, incoming);
 		Message[] pumpControllerRepaired = extractAllMatches(MessageKind.PUMP_CONTROL_REPAIRED_n, incoming);
@@ -581,7 +634,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 	private double getPumpTotalCapacity(int numberOfPumps) {
 		int pumpTotalCapacity = 0;
 		
-		for(int i = 0; i <= numberOfPumps; i++) {
+		for(int i = 0; i < numberOfPumps; i++) {
 			pumpTotalCapacity += configuration.getPumpCapacity(i);
 		}
 		
@@ -650,6 +703,17 @@ public class MySteamBoilerController implements SteamBoilerController {
 	}
 	
 	/**
+	 * used during emergency shut down to close all pumps
+	 * 
+	 * @param outgoing
+	 */
+	private void closeAllPumps(Mailbox outgoing) {
+		for(int i = 0; i < getNoOfPumps(); i++) {
+			outgoing.send(new Message(MessageKind.CLOSE_PUMP_n,i));
+		}
+	}
+	
+	/**
 	 * method used to estimate water level if the sensor breaks based of last known reading
 	 * for first cycle it will use the last reading provided by the sensor
 	 * after first cycle it will use the max per pump opened as an estimated of the water level
@@ -678,7 +742,12 @@ public class MySteamBoilerController implements SteamBoilerController {
 		for(int i = 0; i < pumpsOpen.length; i++) {
 			openPumpCapacity += configuration.getPumpCapacity(pumpsOpen[i]);
 		}
-		return Math.abs((lastKnownWaterLevel + (openPumpCapacity * 5)) - waterLevel);
+		double estimateSteamLevel = ((lastKnownWaterLevel + (openPumpCapacity * 5)) - waterLevel);
+		
+		if(estimateSteamLevel > configuration.getMaximualSteamRate()) {
+			return configuration.getMaximualSteamRate();
+		}
+		return estimateSteamLevel;
 	}
 	
 	/**
@@ -733,7 +802,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @return
 	 */
 	private boolean waterLevelWithinLimits(double waterLevel) {
-		if(waterLevel > (minPossibleWaterLevel * 0.8) && waterLevel < (maxPossibleWaterLevel * 1.2)) {
+		if(waterLevel > (minPossibleWaterLevel * 0.9) && waterLevel < (maxPossibleWaterLevel * 1.1)) {
 			return true;
 		}
 		return false;
