@@ -124,23 +124,24 @@ public class MySteamBoilerController implements SteamBoilerController {
 		Message physicalUnitReady = extractOnlyMatch(MessageKind.PHYSICAL_UNITS_READY, incoming);
 		
 		if (transmissionFailure(levelMessage, steamMessage, pumpStateMessages, pumpControlStateMessages)) {
-			// Level and steam messages required, so emergency stop.
-			this.mode = State.EMERGENCY_STOP;
-		}
-		if(detectImminentFailure(lastKnownWaterLevel)) {
+		// Level and steam messages required, so emergency stop.
 			this.mode = State.EMERGENCY_STOP;
 		}
 		
 		if(this.mode != State.EMERGENCY_STOP) {
-
-			
 			if((detectPumpFailure(levelMessage.getDoubleParameter(), pumpStateMessages, pumpControlStateMessages, outgoing) || 
-					detectSteamLevelFailure(steamMessage, outgoing)) && this.mode == State.NORMAL) {
+					detectSteamLevelFailure(steamMessage.getDoubleParameter(), outgoing)) && this.mode == State.NORMAL) {
 				mode = State.DEGRADED;
 			}
 		
 			if(dectectWaterLevelFailure(levelMessage, outgoing) && this.mode == State.NORMAL) {
 				this.mode = State.RESCUE;
+			}
+			
+			if(detectImminentFailure(lastKnownWaterLevel)) {
+				closeAllPumps(outgoing);
+				emergencyShutdown(outgoing);
+				this.mode = State.EMERGENCY_STOP;
 			}
 				
 			if(detectRepair(incoming, outgoing)) {
@@ -176,10 +177,9 @@ public class MySteamBoilerController implements SteamBoilerController {
 	}
 	
 	/**
-	 * updates the last known steam level and water level variables
+	 * updates the last known water level variable
 	 * 
 	 * @param waterLevel
-	 * @param steamLevel
 	 */
 	private void updateExpectedLevels(double waterLevel, double steamLevel) {
 		if(!waterLevelFailure) {
@@ -364,7 +364,6 @@ public class MySteamBoilerController implements SteamBoilerController {
 		//if degraded mode is due to steam sensor failure, system will estimate the steam level
 		if(steamLevelFailure) {
 			steamLevel = estimateSteamLevel(lastKnownWaterLevel, waterLevel, getPumpsOpen(pumpStates));
-			lastKnownSteamLevel = steamLevel;
 		}
 		int pumpsToActivate = pumpsToActivate(waterLevel, steamLevel);
 		turnPumpsOnOff(getPumpsOpen(pumpStates), getPumpsClosed(pumpStates), pumpsToActivate, outgoing);
@@ -474,8 +473,9 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @param steamLevel - double given by the steam level sensor
 	 * @param outgoing   - outgoing mailbox to send failure detection message
 	 */
-	private boolean detectSteamLevelFailure(Message steamLevel, Mailbox outgoing) {
-		if(steamLevel.getDoubleParameter() < 0.0 || steamLevel.getDoubleParameter() > configuration.getMaximualSteamRate()) {
+	private boolean detectSteamLevelFailure(double steamLevel, Mailbox outgoing) {
+		if(steamLevel < 0.0 || steamLevel > configuration.getMaximualSteamRate()
+				|| steamLevel < lastKnownSteamLevel) {
 			steamLevelFailure = true;
 			outgoing.send(new Message(MessageKind.STEAM_FAILURE_DETECTION));
 			return true;
@@ -498,7 +498,6 @@ public class MySteamBoilerController implements SteamBoilerController {
 		for(int i = 0; i < getNoOfPumps(); i++) {
 			if(pumpFailureDetected[i] == true || pumpControllerFailureDetected[i] == true) {
 				pumpOrPumpControllerFailure = true;
-				return false;
 			}
 		}
 		
@@ -510,7 +509,8 @@ public class MySteamBoilerController implements SteamBoilerController {
 			return true;
 		} 
 		//checks water level is within expected range and not caused by pump or controller failure
-		else if (!waterLevelWithinLimits(waterLevel.getDoubleParameter()) && !pumpOrPumpControllerFailure && mode == State.NORMAL) {
+		else if (!waterLevelWithinLimits(waterLevel.getDoubleParameter()) && !pumpOrPumpControllerFailure && 
+				(mode == State.NORMAL || mode == State.DEGRADED)) {
 			waterLevelFailure = true;
 			outgoing.send(new Message(MessageKind.LEVEL_FAILURE_DETECTION));
 			return true;
@@ -528,7 +528,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 			return true;
 		} else if (waterLevel > maxSafteyLimit() && this.mode != State.WAITING) {
 			return true;
-		} else if (waterLevel < minSafteyLimit()*1.2 && heaterOn == true) {
+		} else if (waterLevel < minSafteyLimit() && heaterOn == true) {
 			return true;
 		}
 		return false;
@@ -861,7 +861,6 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 */
 	private double minSafteyLimit() {
 		return configuration.getMinimalLimitLevel();
-	}
-	
+	}	
 }
 
