@@ -612,14 +612,14 @@ public class MySteamBoilerController implements SteamBoilerController {
 		double[] proximtyToOptimal = new double[pumpsAvaliable];
 		double[] maxPerPumpsOpen = new double[pumpsAvaliable];
 		double[] minPerPumpsOpen = new double[pumpsAvaliable];
-		double[] averagePerPumpsOpen = new double[pumpsAvaliable];
+		
+		double levelDecepency = configuration.getCapacity();
 		
 		//calculate the possible range of the water levels per pump(s) activated
 		for(int i = 0; i < pumpsAvaliable; i++) {
 			maxPerPumpsOpen[i] = getMaxLevelPerPump(waterLevel, i, steamLevel);
 			minPerPumpsOpen[i] = getMinLevelPerPump(waterLevel, i);
 			proximtyToOptimal[i] = Math.abs(((maxPerPumpsOpen[i] + minPerPumpsOpen[i]) / 2) - optimalWaterLevel());
-			averagePerPumpsOpen[i] = Math.abs((maxPerPumpsOpen[i] + minPerPumpsOpen[i]) / 2);
 		}
 		
 		//if current water level is above max normal level, returns -1 which will shut all pumps
@@ -633,10 +633,11 @@ public class MySteamBoilerController implements SteamBoilerController {
 		} else {
 			//Determines how many pumps to activate based on possible ranges
 			for(int i = 0; i < pumpsAvaliable;i++) {
-				if(maxPerPumpsOpen[i] < maxWaterLevel()	&& minPerPumpsOpen[i] > minWaterLevel()) {
+				if(maxPerPumpsOpen[i] < maxWaterLevel()	&& minPerPumpsOpen[i] > minWaterLevel() && proximtyToOptimal[i] < levelDecepency) {
 					pumpsToActivate = i;
 					maxPossibleWaterLevel = maxPerPumpsOpen[i];
 					minPossibleWaterLevel = minPerPumpsOpen[i];
+					levelDecepency = proximtyToOptimal[i];
 				}
 			}
 		}
