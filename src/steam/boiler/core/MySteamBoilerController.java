@@ -102,7 +102,9 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 */
 	@Override
 	public String getStatusMessage() {
-		return this.mode.toString();
+		String currentMode = this.mode.toString();
+		assertNotNull(currentMode);
+		return currentMode;
 	}
 
 	/**
@@ -134,7 +136,8 @@ public class MySteamBoilerController implements SteamBoilerController {
 			// Asserts level and steam message is not null
 			assertNotNull(levelMessage);
 			assertNotNull(steamMessage);
-			// Detect an repairs, resets to normal mode, can be overridden if more failures are present
+			// Detect an repairs, resets to normal mode, can be overridden if more failures
+			// are present
 			if (detectRepair(incoming, outgoing)) {
 				outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.NORMAL));
 				this.mode = State.NORMAL;
@@ -148,8 +151,9 @@ public class MySteamBoilerController implements SteamBoilerController {
 			if (dectectWaterLevelFailure(levelMessage, outgoing) && this.mode == State.NORMAL) {
 				this.mode = State.RESCUE;
 			}
-			// Detects if Imminent failure could occur i.e. water level too high/low, steam and water sensor failure
-			if (detectImminentFailure(this.lastKnownWaterLevel)) {
+			// Detects if Imminent failure could occur i.e. water level too high/low, steam
+			// and water sensor failure
+			if (detectImminentFailure(levelMessage.getDoubleParameter())) {
 				closeAllPumps(outgoing);
 				emergencyShutdown(outgoing);
 				this.mode = State.EMERGENCY_STOP;
@@ -176,7 +180,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 			}
 			// Update global double variables lastKnownSteamLevel and lastKnownSteamLevel
 			updateExpectedLevels(levelMessage.getDoubleParameter(), steamMessage.getDoubleParameter());
-		} 
+		}
 		// EMERGENCY MODE
 		else if (this.mode == State.EMERGENCY_STOP) {
 			closeAllPumps(outgoing);
@@ -422,14 +426,18 @@ public class MySteamBoilerController implements SteamBoilerController {
 	private void rescueOperationalMode(Message[] pumpStates, Message steamMessage, Mailbox outgoing) {
 		outgoing.send(new Message(MessageKind.MODE_m, Mailbox.Mode.RESCUE));
 		int activePumps = getPumpsOpen(pumpStates).length;
+		System.out.println("AP: " + activePumps);
 		// Estimate water level since sensor failure has been detected
 		double estimatedWaterLevel = estimateWaterLevel(activePumps, this.lastKnownWaterLevel,
 				steamMessage.getDoubleParameter());
+		System.out.println("EWL: " + estimatedWaterLevel);
 		// Operate as normal using estimated water level
 		int pumpsToActivate = pumpsToActivate(estimatedWaterLevel, steamMessage.getDoubleParameter());
+		System.out.println("PTA: " + pumpsToActivate);
 		turnPumpsOnOff(getPumpsOpen(pumpStates), getPumpsClosed(pumpStates), pumpsToActivate, outgoing);
 		// update lastKnownWaterLevel to be used in next cycle
 		this.lastKnownWaterLevel = estimatedWaterLevel;
+		System.out.println("LKWL: " + this.lastKnownWaterLevel);
 	}
 
 	/**
@@ -525,7 +533,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 */
 	private boolean detectSteamLevelFailure(Message steamMessage, Mailbox outgoing) {
 		double steamLevel = steamMessage.getDoubleParameter();
-		
+
 		if (steamLevel < 0.0 || steamLevel > this.configuration.getMaximualSteamRate()
 				|| steamLevel < this.lastKnownSteamLevel) {
 			this.steamLevelFailure = true;
@@ -545,12 +553,14 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @return boolean - True indicates level sensor failure
 	 */
 	private boolean dectectWaterLevelFailure(Message waterLevel, Mailbox outgoing) {
-		boolean pumpOrPumpControllerFailure = false;
+		boolean pumpOrControllerFailure = false;
 
-		// checks for failure of pump or controller
-		for (int i = 0; i < getNoOfPumps(); i++) {
-			if (this.pumpFailureDetected[i] == true || this.pumpControllerFailureDetected[i] == true) {
-				pumpOrPumpControllerFailure = true;
+		// Checks water level discrepancy is not caused by pump or controller failure
+		for (int i = 0; i < this.pumpFailureDetected.length; i++) {
+			if (this.pumpControllerFailureDetected[i] == true) {
+				pumpOrControllerFailure = true;
+			} else if (this.pumpFailureDetected[i] == true) {
+				pumpOrControllerFailure = true;
 			}
 		}
 
@@ -567,7 +577,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 		// controller failure
 		// asserts boiler is operating, else false positive will be triggered during
 		// initialisationMode()
-		else if (!waterLevelWithinLimits(waterLevel.getDoubleParameter()) && !pumpOrPumpControllerFailure
+		else if (!waterLevelWithinLimits(waterLevel.getDoubleParameter()) && !pumpOrControllerFailure
 				&& (this.mode == State.NORMAL || this.mode == State.DEGRADED)) {
 			this.waterLevelFailure = true;
 			outgoing.send(new Message(MessageKind.LEVEL_FAILURE_DETECTION));
@@ -584,11 +594,21 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @return boolean - True means multiply failures have been detected
 	 */
 	private boolean detectImminentFailure(double waterLevel) {
+		double currentWaterLevel;
+		// If level sensor has failed, uses lastKnownWaterLevel
+		if (this.waterLevelFailure) {
+			currentWaterLevel = this.lastKnownWaterLevel;
+		} else {
+			currentWaterLevel = waterLevel;
+		}
+		// Checks for multiple system failures
 		if (this.waterLevelFailure && this.steamLevelFailure) {
 			return true;
-		} else if (waterLevel > maxSafteyLimit() && this.mode != State.WAITING) {
+		}
+		// Checks water level is inside the safety limits
+		else if (currentWaterLevel > maxSafteyLimit() && this.mode != State.WAITING) {
 			return true;
-		} else if (waterLevel < minSafteyLimit() && this.heaterOn == true) {
+		} else if (currentWaterLevel < minSafteyLimit() && this.heaterOn == true) {
 			return true;
 		}
 		return false;
@@ -660,8 +680,9 @@ public class MySteamBoilerController implements SteamBoilerController {
 		double[] proximtyToOptimal = new double[pumpsAvaliable];
 		double[] maxPerPumpsOpen = new double[pumpsAvaliable];
 		double[] minPerPumpsOpen = new double[pumpsAvaliable];
-		// Double used as stand in for distance between average water level per pump and optimal water level
-		double levelDecepency = this.configuration.getCapacity();
+		// Double used as stand in for distance between average water level per pump and
+		// optimal water level
+		double levelDiscrepancy = this.configuration.getCapacity();
 
 		// calculate the possible range of the water levels per pump(s) activated
 		for (int i = 0; i < pumpsAvaliable; i++) {
@@ -670,7 +691,8 @@ public class MySteamBoilerController implements SteamBoilerController {
 			proximtyToOptimal[i] = Math.abs(((maxPerPumpsOpen[i] + minPerPumpsOpen[i]) / 2) - optimalWaterLevel());
 		}
 
-		// if current water level is above max normal level, returns -1 which will shut all pumps
+		// if current water level is above max normal level, returns -1 which will shut
+		// all pumps
 		if (waterLevel >= maxWaterLevel()) {
 			return -1;
 		}
@@ -682,11 +704,11 @@ public class MySteamBoilerController implements SteamBoilerController {
 		// Determines how many pumps to activate based on possible ranges
 		for (int i = 0; i < pumpsAvaliable; i++) {
 			if (maxPerPumpsOpen[i] < maxWaterLevel() && minPerPumpsOpen[i] > minWaterLevel()
-					&& proximtyToOptimal[i] < levelDecepency) {
+					&& proximtyToOptimal[i] < levelDiscrepancy) {
 				pumpsToActivate = i;
 				this.maxPossibleWaterLevel = maxPerPumpsOpen[i];
 				this.minPossibleWaterLevel = minPerPumpsOpen[i];
-				levelDecepency = proximtyToOptimal[i];
+				levelDiscrepancy = proximtyToOptimal[i];
 			}
 		}
 		return pumpsToActivate;
@@ -719,6 +741,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 	private static int[] getPumpsOpen(Message[] pumpState) {
 		int[] currentPumpsOpen = Arrays.stream(pumpState).filter(m -> m.getBooleanParameter())
 				.mapToInt(m -> m.getIntegerParameter()).toArray();
+		assertNotNull(currentPumpsOpen);
 		return currentPumpsOpen;
 	}
 
@@ -731,6 +754,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 	private static int[] getPumpsClosed(Message[] pumpState) {
 		int[] currentPumpsClosed = Arrays.stream(pumpState).filter(m -> !m.getBooleanParameter())
 				.mapToInt(m -> m.getIntegerParameter()).toArray();
+		assertNotNull(currentPumpsClosed);
 		return currentPumpsClosed;
 	}
 
@@ -757,9 +781,9 @@ public class MySteamBoilerController implements SteamBoilerController {
 					outgoing.send(new Message(MessageKind.CLOSE_PUMP_n, pumpNo));
 					this.pumpKnownState[pumpNo] = false;
 					currentPumpsOpen--;
-				} 
+				}
 			}
-		} 
+		}
 		// Opens pumps if required
 		else {
 			for (int i = 0; i < currentPumpsClosed; i++) {
@@ -768,7 +792,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 					outgoing.send(new Message(MessageKind.OPEN_PUMP_n, pumpNo));
 					this.pumpKnownState[pumpNo] = true;
 					pumpsToOpen--;
-				} 
+				}
 			}
 		}
 	}
@@ -803,7 +827,9 @@ public class MySteamBoilerController implements SteamBoilerController {
 	}
 
 	/**
-	 * method used to estimate steam level production, when steam level fails
+	 * method used to estimate steam level production, when steam level fails using
+	 * the difference between the lastKnownWaterLevel plus the capacity of all the
+	 * pumps open and the current waterLevel to estimated the steam level
 	 * 
 	 * @param lastCycleWaterLevel - Water level of the last cycle
 	 * @param waterLevel          - Water level of current cycle
@@ -815,6 +841,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 		for (int i = 0; i < pumpsOpen.length; i++) {
 			openPumpCapacity += this.configuration.getPumpCapacity(pumpsOpen[i]);
 		}
+
 		double estimateSteamLevel = ((lastCycleWaterLevel + (openPumpCapacity)) - waterLevel);
 
 		if (estimateSteamLevel > this.configuration.getMaximualSteamRate()) {
@@ -833,7 +860,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @return double - Max possible water level after one cycle
 	 */
 	private double getMaxLevelPerPump(double waterLevel, int pumpsActive, double steamLevel) {
-		return waterLevel + (5 * getPumpTotalCapacity(pumpsActive)) - (5 * steamLevel);
+		return (waterLevel + (5 * getPumpTotalCapacity(pumpsActive))) - (5 * steamLevel);
 	}
 
 	/**
@@ -846,7 +873,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @return double - Minimum possible water level after one cycle
 	 */
 	private double getMinLevelPerPump(double waterLevel, int pumpsActive) {
-		return waterLevel + (5 * getPumpTotalCapacity(pumpsActive)) - (5 * this.configuration.getMaximualSteamRate());
+		return (waterLevel + (5 * getPumpTotalCapacity(pumpsActive))) - (5 * this.configuration.getMaximualSteamRate());
 	}
 
 	/**
@@ -879,7 +906,7 @@ public class MySteamBoilerController implements SteamBoilerController {
 	 * @return boolean - True, if water is within the acceptable range
 	 */
 	private boolean waterLevelWithinLimits(double waterLevel) {
-		if (waterLevel > (this.minPossibleWaterLevel * 0.9) && waterLevel < (this.maxPossibleWaterLevel * 1.1)) {
+		if (waterLevel > (this.minPossibleWaterLevel * 0.8) && waterLevel < (this.maxPossibleWaterLevel * 1.2)) {
 			return true;
 		}
 		return false;
