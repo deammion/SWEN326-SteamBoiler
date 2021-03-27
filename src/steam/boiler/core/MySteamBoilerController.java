@@ -845,12 +845,13 @@ public class MySteamBoilerController implements SteamBoilerController {
 			openPumpCapacity += this.configuration.getPumpCapacity(pumpsOpen[i]);
 		}
 
-		double estimateSteamLevel = ((lastCycleWaterLevel + (openPumpCapacity)) - waterLevel);
+		double estimatedSteamLevel = Math.abs((lastCycleWaterLevel + (openPumpCapacity)) - waterLevel);
+		
 		// To account for discrepancy between readings and calculations
-		if (estimateSteamLevel > this.configuration.getMaximualSteamRate()) {
+		if (estimatedSteamLevel > this.configuration.getMaximualSteamRate()) {
 			return this.configuration.getMaximualSteamRate();
 		}
-		return estimateSteamLevel;
+		return estimatedSteamLevel;
 	}
 
 	/**
