@@ -147,7 +147,8 @@ public class MySteamBoilerController implements SteamBoilerController {
 				this.mode = State.DEGRADED;
 			}
 			// Detects a level sensor failure, sets mode to rescue
-			if (dectectWaterLevelFailure(levelMessage, outgoing) && this.mode == State.NORMAL) {
+			if (dectectWaterLevelFailure(levelMessage, outgoing)
+					&& (this.mode == State.NORMAL || this.mode == State.DEGRADED)) {
 				this.mode = State.RESCUE;
 			}
 			// Detects if Imminent failure could occur i.e. water level too high/low, steam
